@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SBV Line Checker</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+    label { display: block; font-size: 14px; margin-bottom: 6px; }
+    input[type="number"], input[type="text"] { padding: 10px; width: 180px; }
+    input[type="file"] { padding: 8px; }
+    button { padding: 10px 14px; cursor: pointer; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-top: 16px; }
+    .muted { color: #666; font-size: 13px; }
+    .error { color: #b00020; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 10px; vertical-align: top; }
+    th { background: #f6f6f6; text-align: left; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#f0f0f0; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>SBV Line Checker</h1>
+  <p class="muted">
+    Upload an <span class="pill">.sbv</span> file, choose a character limit, and see lines that exceed it (with context).
+  </p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="file">SBV File</label>
+        <input id="file" type="file" accept=".sbv,text/plain" />
+      </div>
+
+      <div>
+        <label for="limit">Limit</label>
+        <input id="limit" type="number" min="0" max="5000" value="42" />
+      </div>
+
+      <div style="flex: 1; min-width: 240px;">
+        <label for="token">Bearer token (optional)</label>
+        <input id="token" type="text" placeholder="Only if your Worker requires AUTH_TOKEN" style="width: 100%;" />
+      </div>
+
+      <div>
+        <button id="run">Check</button>
+      </div>
+    </div>
+
+    <p class="muted" style="margin-top: 10px;">
+      If your Worker has <code>AUTH_TOKEN</code> set, paste the token above. Otherwise leave it blank.
+    </p>
+  </div>
+
+  <div id="status" class="card" style="display:none;"></div>
+  <div id="result" class="card" style="display:none;"></div>
+
+  <script>
+    const WORKER_URL = "https://sbvcount.saurabhshrivastava224.workers.dev/";
+
+    const fileEl = document.getElementById("file");
+    const limitEl = document.getElementById("limit");
+    const tokenEl = document.getElementById("token");
+    const runEl = document.getElementById("run");
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+
+    function showStatus(html) {
+      statusEl.style.display = "block";
+      statusEl.innerHTML = html;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      }[c]));
+    }
+
+    function renderTable(items) {
+      if (!items || items.length === 0) {
+        return `<p>✅ No faulty lines found.</p>`;
+      }
+
+      let rows = items.map(it => `
+        <tr>
+          <td><b>${it.line_num}</b></td>
+          <td>${it.chars_count}</td>
+          <td class="mono">${escapeHtml(it.prev_line_2 ?? "")}</td>
+          <td class="mono">${escapeHtml(it.prev_line_1 ?? "")}</td>
+          <td class="mono"><b>${escapeHtml(it.line)}</b></td>
+          <td class="mono">${escapeHtml(it.next_line_1 ?? "")}</td>
+          <td class="mono">${escapeHtml(it.next_line_2 ?? "")}</td>
+        </tr>
+      `).join("");
+
+      return `
+        <table>
+          <thead>
+            <tr>
+              <th>Line #</th>
+              <th>Chars</th>
+              <th>Prev-2</th>
+              <th>Prev-1</th>
+              <th>Line</th>
+              <th>Next+1</th>
+              <th>Next+2</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    runEl.addEventListener("click", async () => {
+      resultEl.style.display = "none";
+      resultEl.innerHTML = "";
+
+      const f = fileEl.files && fileEl.files[0];
+      if (!f) {
+        showStatus(`<p class="error">Please choose an .sbv file first.</p>`);
+        return;
+      }
+
+      const limit = Number(limitEl.value);
+      if (!Number.isFinite(limit) || limit < 0 || limit > 5000) {
+        showStatus(`<p class="error">Limit must be between 0 and 5000.</p>`);
+        return;
+      }
+
+      showStatus(`<p>Reading file…</p>`);
+      const sbvText = await f.text();
+
+      showStatus(`<p>Calling Worker…</p>`);
+
+      const headers = { "Content-Type": "application/json" };
+      const token = tokenEl.value.trim();
+      if (token) headers["Authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+
+      try {
+        const resp = await fetch(WORKER_URL, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ limit, sbvText })
+        });
+
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+        if (!resp.ok) {
+          showStatus(`<p class="error">Worker error (HTTP ${resp.status}):\n${escapeHtml(JSON.stringify(data, null, 2))}</p>`);
+          return;
+        }
+
+        showStatus(`<p>✅ Done. Found <b>${data.count}</b> faulty line(s) with limit <b>${data.limit}</b>.</p>`);
+        resultEl.style.display = "block";
+        resultEl.innerHTML = `
+          <p><b>Limit:</b> ${data.limit} &nbsp; | &nbsp; <b>Count:</b> ${data.count}</p>
+          ${renderTable(data.items)}
+        `;
+      } catch (e) {
+        showStatus(`<p class="error">Fetch failed:\n${escapeHtml(String(e))}</p>`);
+      }
+    });
+  </script>
+</body>
+</html>
